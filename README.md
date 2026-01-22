@@ -55,5 +55,5 @@ The utility uses Windows Event Hooks (`SetWinEventHook`) to detect when new wind
 
 ## License
 
-MIT License - Feel free to use and modify as needed.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
