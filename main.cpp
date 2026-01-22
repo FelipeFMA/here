@@ -1,13 +1,40 @@
+#define _CRT_SECURE_NO_WARNINGS
+#define UNICODE
+#define _UNICODE
 #define WIN32_LEAN_AND_MEAN
-#define _WIN32_WINNT 0x0500
+#define _WIN32_WINNT 0x0A00
+#pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "shcore.lib")
+
 #include <windows.h>
+#include <shellscalingapi.h>
+#include <dwmapi.h>
 #include <shellapi.h>
-#include <iostream>
+#include <commctrl.h>
 #include <set>
 #include <string>
+#include <vector>
+#include <sstream>
+
+// Dark theme colors
+#define CLR_BG       RGB(30, 30, 30)
+#define CLR_BG_LOG   RGB(20, 20, 20)
+#define CLR_TEXT     RGB(220, 220, 220)
+#define CLR_ACCENT   RGB(100, 149, 237)  // Cornflower blue
+#define CLR_DIM      RGB(140, 140, 140)
 
 // Global set to track windows we've already processed
 std::set<HWND> processedWindows;
+
+// Log storage
+std::vector<std::wstring> logMessages;
+HWND hLogListBox = NULL;
+
+// Forward declarations
+void AddLog(const std::wstring& msg);
+void AddLog(const std::string& msg);
 
 // Check if a window is a valid top-level window that should be repositioned
 bool IsValidWindow(HWND hwnd) {
@@ -15,31 +42,16 @@ bool IsValidWindow(HWND hwnd) {
         return false;
     }
 
-    // Get window style
     LONG style = GetWindowLong(hwnd, GWL_STYLE);
     LONG exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
 
-    // Skip child windows
-    if (style & WS_CHILD) {
-        return false;
-    }
+    if (style & WS_CHILD) return false;
+    if (exStyle & WS_EX_TOOLWINDOW) return false;
+    if (!(style & WS_CAPTION)) return false;
 
-    // Skip tool windows (tooltips, floating toolbars, etc.)
-    if (exStyle & WS_EX_TOOLWINDOW) {
-        return false;
-    }
-
-    // Skip windows without a title bar (likely system windows)
-    if (!(style & WS_CAPTION)) {
-        return false;
-    }
-
-    // Get window class name to filter out system windows
     char className[256];
     if (GetClassNameA(hwnd, className, sizeof(className))) {
         std::string classStr(className);
-        
-        // Skip common system window classes
         if (classStr == "tooltips_class32" ||
             classStr == "Shell_TrayWnd" ||
             classStr == "Progman" ||
@@ -51,14 +63,11 @@ bool IsValidWindow(HWND hwnd) {
         }
     }
 
-    // Check if window has a reasonable size (not minimized or tiny)
     RECT rect;
     if (GetWindowRect(hwnd, &rect)) {
         int width = rect.right - rect.left;
         int height = rect.bottom - rect.top;
-        if (width < 50 || height < 50) {
-            return false;
-        }
+        if (width < 50 || height < 50) return false;
     }
 
     return true;
@@ -66,46 +75,27 @@ bool IsValidWindow(HWND hwnd) {
 
 // Move a window to the monitor where the cursor is located
 void MoveWindowToCursorMonitor(HWND hwnd) {
-    // Get cursor position
     POINT cursorPos;
-    if (!GetCursorPos(&cursorPos)) {
-        return;
-    }
+    if (!GetCursorPos(&cursorPos)) return;
 
-    // Get the monitor at cursor position
     HMONITOR cursorMonitor = MonitorFromPoint(cursorPos, MONITOR_DEFAULTTONEAREST);
     
-    // Get current window position
     RECT windowRect;
-    if (!GetWindowRect(hwnd, &windowRect)) {
-        return;
-    }
+    if (!GetWindowRect(hwnd, &windowRect)) return;
 
-    // Get the monitor where the window currently is
     HMONITOR windowMonitor = MonitorFromRect(&windowRect, MONITOR_DEFAULTTONEAREST);
 
-    // If window is already on the cursor's monitor, don't move it
-    if (cursorMonitor == windowMonitor) {
-        return;
-    }
+    if (cursorMonitor == windowMonitor) return;
 
-    // Get monitor info for the cursor's monitor
     MONITORINFO cursorMonitorInfo = { sizeof(MONITORINFO) };
-    if (!GetMonitorInfo(cursorMonitor, &cursorMonitorInfo)) {
-        return;
-    }
+    if (!GetMonitorInfo(cursorMonitor, &cursorMonitorInfo)) return;
 
-    // Get monitor info for the window's current monitor
     MONITORINFO windowMonitorInfo = { sizeof(MONITORINFO) };
-    if (!GetMonitorInfo(windowMonitor, &windowMonitorInfo)) {
-        return;
-    }
+    if (!GetMonitorInfo(windowMonitor, &windowMonitorInfo)) return;
 
-    // Calculate window dimensions
     int windowWidth = windowRect.right - windowRect.left;
     int windowHeight = windowRect.bottom - windowRect.top;
 
-    // Calculate the relative position of the window on its current monitor
     RECT& srcWork = windowMonitorInfo.rcWork;
     RECT& dstWork = cursorMonitorInfo.rcWork;
 
@@ -114,135 +104,245 @@ void MoveWindowToCursorMonitor(HWND hwnd) {
     int dstWorkWidth = dstWork.right - dstWork.left;
     int dstWorkHeight = dstWork.bottom - dstWork.top;
 
-    // Calculate relative position (0.0 to 1.0) on source monitor
     float relX = (float)(windowRect.left - srcWork.left) / (float)srcWorkWidth;
     float relY = (float)(windowRect.top - srcWork.top) / (float)srcWorkHeight;
 
-    // Apply same relative position to destination monitor
     int newX = dstWork.left + (int)(relX * dstWorkWidth);
     int newY = dstWork.top + (int)(relY * dstWorkHeight);
 
-    // Ensure window fits within the destination monitor
-    if (newX + windowWidth > dstWork.right) {
-        newX = dstWork.right - windowWidth;
-    }
-    if (newY + windowHeight > dstWork.bottom) {
-        newY = dstWork.bottom - windowHeight;
-    }
-    if (newX < dstWork.left) {
-        newX = dstWork.left;
-    }
-    if (newY < dstWork.top) {
-        newY = dstWork.top;
-    }
+    if (newX + windowWidth > dstWork.right) newX = dstWork.right - windowWidth;
+    if (newY + windowHeight > dstWork.bottom) newY = dstWork.bottom - windowHeight;
+    if (newX < dstWork.left) newX = dstWork.left;
+    if (newY < dstWork.top) newY = dstWork.top;
 
-    // Move the window
-    SetWindowPos(hwnd, NULL, newX, newY, 0, 0, 
-                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(hwnd, NULL, newX, newY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-    // Get window title for logging
     char title[256];
     GetWindowTextA(hwnd, title, sizeof(title));
-    std::cout << "Moved window \"" << title << "\" to cursor monitor" << std::endl;
+    std::string msg = "Moved: \"";
+    msg += title;
+    msg += "\"";
+    AddLog(msg);
 }
 
 // WinEvent callback function
 void CALLBACK WinEventProc(
-    HWINEVENTHOOK hWinEventHook,
-    DWORD event,
-    HWND hwnd,
-    LONG idObject,
-    LONG idChild,
-    DWORD dwEventThread,
-    DWORD dwmsEventTime)
+    HWINEVENTHOOK hWinEventHook, DWORD event, HWND hwnd,
+    LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime)
 {
-    // Only process window-level events
-    if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF) {
-        return;
-    }
+    if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
+    if (!hwnd) return;
+    if (processedWindows.find(hwnd) != processedWindows.end()) return;
+    if (!IsValidWindow(hwnd)) return;
 
-    if (!hwnd) {
-        return;
-    }
-
-    // Check if we've already processed this window
-    if (processedWindows.find(hwnd) != processedWindows.end()) {
-        return;
-    }
-
-    // Validate the window
-    if (!IsValidWindow(hwnd)) {
-        return;
-    }
-
-    // Mark as processed and move the window
     processedWindows.insert(hwnd);
     MoveWindowToCursorMonitor(hwnd);
 }
 
 // Cleanup destroyed windows from our tracking set
 void CALLBACK CleanupProc(
-    HWINEVENTHOOK hWinEventHook,
-    DWORD event,
-    HWND hwnd,
-    LONG idObject,
-    LONG idChild,
-    DWORD dwEventThread,
-    DWORD dwmsEventTime)
+    HWINEVENTHOOK hWinEventHook, DWORD event, HWND hwnd,
+    LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime)
 {
     if (hwnd && event == EVENT_OBJECT_DESTROY) {
         processedWindows.erase(hwnd);
     }
 }
 
-// Tray icon globals
+// Tray icon definitions
 #define WM_TRAYICON (WM_USER + 1)
 #define IDM_EXIT 1001
-#define IDM_HIDE 1002
-#define IDM_SHOW 1003
+#define IDM_TOGGLE 1002
 
-NOTIFYICONDATA nid = {};
-HWND hHiddenWnd = NULL;
-bool isConsoleVisible = true;
+NOTIFYICONDATAW nid = {};
+HWND hMainWnd = NULL;
+HWND hTrayWnd = NULL;
+bool isWindowVisible = false;
+HBRUSH hBgBrush = NULL;
+HBRUSH hLogBgBrush = NULL;
+HFONT hFont = NULL;
+HFONT hTitleFont = NULL;
+UINT g_dpi = 96;  // Current system DPI (96 = 100% scaling)
+
+// Helper to scale a value by DPI
+inline int Scale(int value) {
+    return MulDiv(value, g_dpi, 96);
+}
+
+void AddLog(const std::wstring& msg) {
+    logMessages.push_back(msg);
+    if (hLogListBox) {
+        SendMessageW(hLogListBox, LB_ADDSTRING, 0, (LPARAM)msg.c_str());
+        SendMessageW(hLogListBox, LB_SETTOPINDEX, logMessages.size() - 1, 0);
+    }
+}
+
+void AddLog(const std::string& msg) {
+    int size = MultiByteToWideChar(CP_UTF8, 0, msg.c_str(), -1, NULL, 0);
+    std::wstring wstr(size, 0);
+    MultiByteToWideChar(CP_UTF8, 0, msg.c_str(), -1, &wstr[0], size);
+    wstr.resize(size - 1);
+    AddLog(wstr);
+}
+
+// Custom draw for listbox
+LRESULT HandleListBoxDraw(DRAWITEMSTRUCT* dis) {
+    if (dis->itemID == (UINT)-1) return TRUE;
+
+    HDC hdc = dis->hDC;
+    RECT rc = dis->rcItem;
+
+    // Background
+    HBRUSH bgBrush = CreateSolidBrush(CLR_BG_LOG);
+    FillRect(hdc, &rc, bgBrush);
+    DeleteObject(bgBrush);
+
+    // Get text
+    wchar_t text[512];
+    SendMessageW(dis->hwndItem, LB_GETTEXT, dis->itemID, (LPARAM)text);
+
+    // Draw text
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, CLR_TEXT);
+    rc.left += Scale(12);
+    rc.top += Scale(4);
+    SelectObject(hdc, hFont);
+    DrawTextW(hdc, text, -1, &rc, DT_LEFT | DT_SINGLELINE);
+
+    return TRUE;
+}
+
+LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE: {
+        // Enable dark title bar (Windows 10 1809+)
+        BOOL darkMode = TRUE;
+        DwmSetWindowAttribute(hwnd, 20, &darkMode, sizeof(darkMode));  // DWMWA_USE_IMMERSIVE_DARK_MODE
+
+        // Create title label
+        HWND hTitle = CreateWindowW(L"STATIC", L"Here",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            Scale(20), Scale(16), Scale(360), Scale(28), hwnd, NULL, GetModuleHandle(NULL), NULL);
+        SendMessage(hTitle, WM_SETFONT, (WPARAM)hTitleFont, TRUE);
+
+        // Create subtitle
+        HWND hSubtitle = CreateWindowW(L"STATIC", L"New windows spawn on cursor's monitor",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            Scale(20), Scale(44), Scale(360), Scale(20), hwnd, NULL, GetModuleHandle(NULL), NULL);
+        SendMessage(hSubtitle, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // Create log listbox
+        hLogListBox = CreateWindowExW(0, L"LISTBOX", NULL,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+            Scale(20), Scale(80), Scale(360), Scale(260), hwnd, (HMENU)101, GetModuleHandle(NULL), NULL);
+        SendMessage(hLogListBox, LB_SETITEMHEIGHT, 0, Scale(28));
+
+        // Add initial messages
+        AddLog(L"Monitoring started");
+        AddLog(L"Hooks installed successfully");
+        return 0;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        SetBkColor(hdc, CLR_BG);
+        SetTextColor(hdc, CLR_TEXT);
+        return (LRESULT)hBgBrush;
+    }
+
+    case WM_CTLCOLORLISTBOX: {
+        HDC hdc = (HDC)wParam;
+        SetBkColor(hdc, CLR_BG_LOG);
+        SetTextColor(hdc, CLR_TEXT);
+        return (LRESULT)hLogBgBrush;
+    }
+
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lParam;
+        if (dis->CtlID == 101) {
+            return HandleListBoxDraw(dis);
+        }
+        break;
+    }
+
+    case WM_MEASUREITEM: {
+        MEASUREITEMSTRUCT* mis = (MEASUREITEMSTRUCT*)lParam;
+        mis->itemHeight = 28;
+        return TRUE;
+    }
+
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, hBgBrush);
+        return 1;
+    }
+
+    case WM_CLOSE:
+        ShowWindow(hwnd, SW_HIDE);
+        isWindowVisible = false;
+        return 0;
+
+    case WM_DESTROY:
+        return 0;
+
+    default:
+        return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+    return 0;
+}
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_TRAYICON:
-        if (lParam == WM_RBUTTONUP) {
+        if (lParam == WM_LBUTTONUP) {
+            // Left click toggles window
+            if (isWindowVisible) {
+                ShowWindow(hMainWnd, SW_HIDE);
+                isWindowVisible = false;
+            } else {
+                ShowWindow(hMainWnd, SW_SHOW);
+                SetForegroundWindow(hMainWnd);
+                isWindowVisible = true;
+            }
+        } else if (lParam == WM_RBUTTONUP) {
             POINT p;
             GetCursorPos(&p);
-            SetForegroundWindow(hwnd); // Fixes menu not disappearing behavior
+            SetForegroundWindow(hwnd);
             HMENU hMenu = CreatePopupMenu();
-            if (isConsoleVisible) {
-                AppendMenu(hMenu, MF_STRING, IDM_HIDE, "Hide Console");
-            } else {
-                AppendMenu(hMenu, MF_STRING, IDM_SHOW, "Show Console");
-            }
-            AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-            AppendMenu(hMenu, MF_STRING, IDM_EXIT, "Exit");
+            AppendMenuW(hMenu, MF_STRING, IDM_TOGGLE, isWindowVisible ? L"Hide" : L"Show");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
             TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, p.x, p.y, 0, hwnd, NULL);
             DestroyMenu(hMenu);
         }
         break;
+
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDM_EXIT:
-            DestroyWindow(hwnd);
+            Shell_NotifyIconW(NIM_DELETE, &nid);
+            PostQuitMessage(0);
             break;
-        case IDM_HIDE:
-            ShowWindow(GetConsoleWindow(), SW_HIDE);
-            isConsoleVisible = false;
-            break;
-        case IDM_SHOW:
-            ShowWindow(GetConsoleWindow(), SW_SHOW);
-            isConsoleVisible = true;
+        case IDM_TOGGLE:
+            if (isWindowVisible) {
+                ShowWindow(hMainWnd, SW_HIDE);
+                isWindowVisible = false;
+            } else {
+                ShowWindow(hMainWnd, SW_SHOW);
+                SetForegroundWindow(hMainWnd);
+                isWindowVisible = true;
+            }
             break;
         }
         break;
+
     case WM_DESTROY:
-        Shell_NotifyIcon(NIM_DELETE, &nid);
+        Shell_NotifyIconW(NIM_DELETE, &nid);
         PostQuitMessage(0);
         break;
+
     default:
         return DefWindowProc(hwnd, msg, wParam, lParam);
     }
@@ -250,81 +350,92 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 }
 
 int main() {
-    std::cout << "========================================" << std::endl;
-    std::cout << "  Window Position Utility v1.1" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "New windows will spawn on the monitor" << std::endl;
-    std::cout << "where your cursor is located." << std::endl;
-    std::cout << std::endl;
-    std::cout << "Use the generic tray icon to Hide/Show this console." << std::endl;
-    std::cout << "Right-click the tray icon and select Exit to quit." << std::endl;
-    std::cout << "----------------------------------------" << std::endl;
+    // Enable Per-Monitor DPI Awareness for proper HiDPI scaling
+    SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
 
-    // Register hidden window class
-    WNDCLASSEX wc = {0};
-    wc.cbSize = sizeof(WNDCLASSEX);
-    wc.lpfnWndProc = TrayWndProc;
-    wc.hInstance = GetModuleHandle(NULL);
-    wc.lpszClassName = "WindowPosTrayClass";
-    RegisterClassEx(&wc);
+    // Get system DPI
+    HDC hdc = GetDC(NULL);
+    g_dpi = GetDeviceCaps(hdc, LOGPIXELSX);
+    ReleaseDC(NULL, hdc);
 
-    // Create hidden window to handle tray messages
-    hHiddenWnd = CreateWindowEx(0, "WindowPosTrayClass", "Window Pos Tray", 
-                                0, 0, 0, 0, 0, NULL, NULL, GetModuleHandle(NULL), NULL);
-
-    if (!hHiddenWnd) {
-        std::cerr << "Failed to create tray window" << std::endl;
-        return 1;
+    // Hide any attached console
+    if (GetConsoleWindow()) {
+        FreeConsole();
     }
 
-    // Initialize Tray Icon
-    nid.cbSize = sizeof(NOTIFYICONDATA);
-    nid.hWnd = hHiddenWnd;
+    // Initialize common controls
+    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_LISTVIEW_CLASSES };
+    InitCommonControlsEx(&icex);
+
+    // Create brushes
+    hBgBrush = CreateSolidBrush(CLR_BG);
+    hLogBgBrush = CreateSolidBrush(CLR_BG_LOG);
+
+    // Create DPI-scaled fonts
+    hFont = CreateFontW(Scale(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    hTitleFont = CreateFontW(Scale(22), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    // Register main window class
+    WNDCLASSEXW wcMain = { sizeof(WNDCLASSEXW) };
+    wcMain.lpfnWndProc = MainWndProc;
+    wcMain.hInstance = GetModuleHandle(NULL);
+    wcMain.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wcMain.lpszClassName = L"HereMainClass";
+    wcMain.hbrBackground = hBgBrush;
+    RegisterClassExW(&wcMain);
+
+    // Register tray window class
+    WNDCLASSEXW wcTray = { sizeof(WNDCLASSEXW) };
+    wcTray.lpfnWndProc = TrayWndProc;
+    wcTray.hInstance = GetModuleHandle(NULL);
+    wcTray.lpszClassName = L"HereTrayClass";
+    RegisterClassExW(&wcTray);
+
+    // Create main window (hidden initially)
+    hMainWnd = CreateWindowExW(
+        WS_EX_APPWINDOW,
+        L"HereMainClass", L"Here",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, Scale(420), Scale(380),
+        NULL, NULL, GetModuleHandle(NULL), NULL);
+
+    if (!hMainWnd) return 1;
+
+    // Create hidden tray message window
+    hTrayWnd = CreateWindowExW(0, L"HereTrayClass", L"", 0, 0, 0, 0, 0, NULL, NULL, GetModuleHandle(NULL), NULL);
+    if (!hTrayWnd) return 1;
+
+    // Initialize tray icon
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hTrayWnd;
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIcon(NULL, IDI_APPLICATION); // Use default application icon
-    strcpy(nid.szTip, "Window Position Utility");
-    Shell_NotifyIcon(NIM_ADD, &nid);
+    nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wcscpy(nid.szTip, L"Here - Window Position Utility");
+    Shell_NotifyIconW(NIM_ADD, &nid);
 
-    // Set up hook for window show events
+    // Set up hooks
     HWINEVENTHOOK showHook = SetWinEventHook(
-        EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
-        NULL,
-        WinEventProc,
-        0, 0,
-        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
-    );
+        EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, NULL, WinEventProc,
+        0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+    HWINEVENTHOOK foregroundHook = SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, NULL, WinEventProc,
+        0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+    HWINEVENTHOOK destroyHook = SetWinEventHook(
+        EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, NULL, CleanupProc,
+        0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
     if (!showHook) {
-        std::cerr << "Error: Failed to set up window show hook. Error code: " 
-                  << GetLastError() << std::endl;
+        MessageBoxW(NULL, L"Failed to set up window hook", L"Error", MB_ICONERROR);
         return 1;
     }
-
-    // Set up hook for foreground window changes (catches some windows that don't trigger SHOW)
-    HWINEVENTHOOK foregroundHook = SetWinEventHook(
-        EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
-        NULL,
-        WinEventProc,
-        0, 0,
-        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
-    );
-
-    if (!foregroundHook) {
-        std::cerr << "Warning: Failed to set up foreground hook." << std::endl;
-    }
-
-    // Set up hook for window destruction (cleanup)
-    HWINEVENTHOOK destroyHook = SetWinEventHook(
-        EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY,
-        NULL,
-        CleanupProc,
-        0, 0,
-        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
-    );
-
-    std::cout << "Hooks installed successfully. Monitoring for new windows..." << std::endl;
 
     // Message loop
     MSG msg;
@@ -333,11 +444,14 @@ int main() {
         DispatchMessage(&msg);
     }
 
-    // Cleanup hooks
+    // Cleanup
     if (showHook) UnhookWinEvent(showHook);
     if (foregroundHook) UnhookWinEvent(foregroundHook);
     if (destroyHook) UnhookWinEvent(destroyHook);
+    DeleteObject(hBgBrush);
+    DeleteObject(hLogBgBrush);
+    DeleteObject(hFont);
+    DeleteObject(hTitleFont);
 
-    std::cout << "Window Position Utility stopped." << std::endl;
     return 0;
 }
