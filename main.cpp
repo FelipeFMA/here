@@ -93,6 +93,35 @@ void MoveWindowToCursorMonitor(HWND hwnd) {
     MONITORINFO windowMonitorInfo = { sizeof(MONITORINFO) };
     if (!GetMonitorInfo(windowMonitor, &windowMonitorInfo)) return;
 
+    // Handle maximized windows specifically
+    if (IsZoomed(hwnd)) {
+        // Restore to allow moving, then move to center of new monitor
+        ShowWindow(hwnd, SW_RESTORE);
+        
+        RECT& dstWork = cursorMonitorInfo.rcWork;
+        int dstW = dstWork.right - dstWork.left;
+        int dstH = dstWork.bottom - dstWork.top;
+        
+        // Target a reasonable size in the center of the destination monitor
+        int targetW = dstW > 1200 ? 1200 : dstW - 100;
+        int targetH = dstH > 900 ? 900 : dstH - 100;
+        int targetX = dstWork.left + (dstW - targetW) / 2;
+        int targetY = dstWork.top + (dstH - targetH) / 2;
+
+        SetWindowPos(hwnd, NULL, targetX, targetY, targetW, targetH, SWP_NOZORDER | SWP_NOACTIVATE);
+        
+        // Re-maximize on the new monitor
+        ShowWindow(hwnd, SW_MAXIMIZE);
+
+        char title[256];
+        GetWindowTextA(hwnd, title, sizeof(title));
+        std::string msg = "Moved (Maximized): \"";
+        msg += title;
+        msg += "\"";
+        AddLog(msg);
+        return;
+    }
+
     int windowWidth = windowRect.right - windowRect.left;
     int windowHeight = windowRect.bottom - windowRect.top;
 
