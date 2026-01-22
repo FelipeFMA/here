@@ -2,6 +2,9 @@
 
 A Windows utility that makes new windows spawn on the monitor where your cursor is located.
 
+<img width="563" height="517" alt="image" src="https://github.com/user-attachments/assets/1beb08d9-d99f-437b-bf18-c3bd2ccfc594" />
+
+
 ## Features
 
 - **Automatic window positioning**: New windows appear on the monitor where your cursor is.
